@@ -1,0 +1,122 @@
+{
+  "criterios de remisión": {
+    "en": "referral criteria",
+    "de": "Überweisungskriterien",
+    "fr": "critères d'orientation",
+    "ru": "критерии направления",
+    "zh": "转诊标准",
+    "ja": "紹介基準"
+  },
+  "criterio de remisión": {
+    "en": "referral criterion",
+    "de": "Überweisungskriterium",
+    "fr": "critère d'orientation",
+    "ru": "критерий направления",
+    "zh": "转诊标准",
+    "ja": "紹介基準"
+  },
+  "remisión a": {
+    "en": "referral to",
+    "de": "Überweisung an",
+    "fr": "orientation vers",
+    "ru": "направление в",
+    "zh": "转诊至",
+    "ja": "への紹介"
+  },
+  "derivación": {
+    "en": "referral",
+    "de": "Überweisung",
+    "fr": "orientation",
+    "ru": "направление",
+    "zh": "转诊",
+    "ja": "紹介"
+  },
+  "neuropediatría": {
+    "en": "pediatric neurology",
+    "de": "Neuropädiatrie",
+    "fr": "neuropédiatrie",
+    "ru": "детская неврология",
+    "zh": "儿童神经病学",
+    "ja": "小児神経学"
+  },
+  "neuropediatra": {
+    "en": "pediatric neurologist",
+    "de": "Neuropädiater",
+    "fr": "neuropédiatre",
+    "ru": "детский невролог",
+    "zh": "儿童神经科医生",
+    "ja": "小児神経科医"
+  },
+  "crisis epiléptica": {
+    "en": "epileptic seizure",
+    "de": "epileptischer Anfall",
+    "fr": "crise d'épilepsie",
+    "ru": "эпилептический приступ",
+    "zh": "癫痫发作",
+    "ja": "てんかん発作"
+  },
+  "crisis febril": {
+    "en": "febrile seizure",
+    "de": "Fieberkrampf",
+    "fr": "crise fébrile",
+    "ru": "фебрильные судороги",
+    "zh": "热性惊厥",
+    "ja": "熱性けいれん"
+  },
+  "retraso psicomotor": {
+    "en": "psychomotor delay",
+    "de": "psychomotorische Entwicklungsverzögerung",
+    "fr": "retard psychomoteur",
+    "ru": "психомоторная задержка",
+    "zh": "精神运动发育迟缓",
+    "ja": "精神運動発達遅滞"
+  },
+  "trastorno del neurodesarrollo": {
+    "en": "neurodevelopmental disorder",
+    "de": "Neuroentwicklungsstörung",
+    "fr": "trouble du neurodéveloppement",
+    "ru": "расстройство нейроразвития",
+    "zh": "神经发育障碍",
+    "ja": "神経発達症"
+  },
+  "espectro autista": {
+    "en": "autism spectrum",
+    "de": "Autismus-Spektrum",
+    "fr": "spectre autistique",
+    "ru": "аутистический спектр",
+    "zh": "自闭症谱系",
+    "ja": "自閉症スペクトラム"
+  },
+  "hipotonía neonatal": {
+    "en": "neonatal hypotonia",
+    "de": "neonatale Hypotonie",
+    "fr": "hypotonie néonatale",
+    "ru": "неонатальная гипотония",
+    "zh": "新生儿肌张力低下",
+    "ja": "新生児筋緊張低下"
+  },
+  "encefalopatía": {
+    "en": "encephalopathy",
+    "de": "Enzephalopathie",
+    "fr": "encéphalopathie",
+    "ru": "энцефалопатия",
+    "zh": "脑病",
+    "ja": "脳症"
+  },
+  "ataxia": {
+    "en": "ataxia",
+    "de": "Ataxie",
+    "fr": "ataxie",
+    "ru": "атаксия",
+    "zh": "共济失调",
+    "ja": "運動失調"
+  },
+  "cefalea": {
+    "en": "headache",
+    "de": "Kopfschmerz",
+    "fr": "céphalée",
+    "ru": "головная боль",
+    "zh": "头痛",
+    "ja": "頭痛"
+  }
+}

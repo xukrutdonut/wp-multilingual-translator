@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  translator:
+    image: 192.168.0.101:5555/wp-multilingual-translator:latest
+    environment:
+      - PYTHONUNBUFFERED=1
+      - SSH_HOST=89.117.169.108
+      - SSH_PORT=65002
+      - SSH_USER=u691704582
+      - SSH_PASS=Mayo-1968!
+      - WP_PATH=/home/u691704582/domains/neuropediatoolkit.org/public_html/
+      - DAILY_LIMIT_PER_LANG=20000
+      - BATCH_SIZE=50
+      - REQUEST_DELAY=0.2
+      - CYCLE_INTERVAL_HOURS=24
+      - USE_LLM=true
+      - LLM_API_URL=http://192.168.0.100:1236/v1
+      - LLM_MODEL=qwen2.5-coder-7b-instruct [rx480 20.04t-s tool]
+      - LLM_TIMEOUT=60
+      - DEEPL_API_KEYS=9cab9e80-1ad0-4fd3-adf5-09ca3bbc4bf9:fx
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 10s
+        max_attempts: 10
+        window: 120s
+      placement:
+        constraints:
+          - node.role == manager

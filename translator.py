@@ -1,0 +1,659 @@
+#!/usr/bin/env python3
+import os
+import sys
+import time
+import json
+import re
+import signal
+import random
+import urllib.request
+import urllib.parse
+import subprocess
+from datetime import datetime
+
+# ================= Configuration =================
+SSH_HOST = os.getenv("SSH_HOST", "89.117.169.108")
+SSH_PORT = os.getenv("SSH_PORT", "65002")
+SSH_USER = os.getenv("SSH_USER", "u691704582")
+SSH_PASS = os.getenv("SSH_PASS", "Mayo-1968!")
+WP_PATH = os.getenv("WP_PATH", "/home/u691704582/domains/neuropediatoolkit.org/public_html/")
+
+# Languages: WordPress TranslatePress code -> Google Translate code
+LANG_MAP = {
+    "en_GB": "en",
+    "de_DE": "de",
+    "fr_FR": "fr",
+    "ru_RU": "ru",
+    "zh_CN": "zh-CN",
+    "ja": "ja"
+}
+
+# DeepL Target Language Mapping
+DEEPL_LANG_MAP = {
+    "en_GB": "EN-GB",
+    "en": "EN-GB",
+    "de_DE": "DE",
+    "de": "DE",
+    "fr_FR": "FR",
+    "fr": "FR",
+    "ru_RU": "RU",
+    "ru": "RU",
+    "zh_CN": "ZH",
+    "zh": "ZH",
+    "ja": "JA"
+}
+
+# DeepL API Keys (supports single key or comma-separated list of keys)
+raw_deepl_keys = os.getenv("DEEPL_API_KEYS", os.getenv("DEEPL_AUTH_KEY", ""))
+DEEPL_KEYS = [k.strip() for k in raw_deepl_keys.split(",") if k.strip()]
+CURRENT_DEEPL_KEY_INDEX = 0
+
+# Local / Remote LLM Translation Engine (OpenAI-compatible / LM Studio / OpenVINO)
+USE_LLM = os.getenv("USE_LLM", "true").lower() in ("true", "1", "yes")
+LLM_API_URL = os.getenv("LLM_API_URL", "http://192.168.0.100:1236/v1")
+LLM_MODEL = os.getenv("LLM_MODEL", "qwen2.5-coder-7b-instruct [rx480 20.04t-s tool]")
+LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "60"))
+
+LANG_NAME_MAP = {
+    "en_GB": "British English",
+    "en": "English",
+    "de_DE": "German",
+    "de": "German",
+    "fr_FR": "French",
+    "fr": "French",
+    "ru_RU": "Russian",
+    "ru": "Russian",
+    "zh_CN": "Simplified Chinese",
+    "zh": "Simplified Chinese",
+    "ja": "Japanese"
+}
+
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "50"))
+DAILY_LIMIT_PER_LANG = int(os.getenv("DAILY_LIMIT_PER_LANG", "1000"))
+REQUEST_DELAY = float(os.getenv("REQUEST_DELAY", "0.2"))
+CYCLE_INTERVAL_HOURS = float(os.getenv("CYCLE_INTERVAL_HOURS", "24"))
+GLOSSARY_FILE = os.getenv("GLOSSARY_FILE", "glossary.json")
+
+RUNNING = True
+
+def handle_signal(sig, frame):
+    global RUNNING
+    print("\n[INFO] Señal de terminación recibida. Cerrando ciclo de forma segura...", flush=True)
+    RUNNING = False
+
+signal.signal(signal.SIGINT, handle_signal)
+signal.signal(signal.SIGTERM, handle_signal)
+
+# ================= Remote Execution Helper =================
+def run_remote_php(php_code, timeout=45):
+    """Executes a PHP snippet in the remote WordPress environment using WP-CLI."""
+    local_temp = f"/tmp/wp_exec_{int(time.time()*1000)}_{random.randint(100,999)}.php"
+    remote_temp = f"/home/{SSH_USER}/tmp/{os.path.basename(local_temp)}"
+
+    with open(local_temp, "w", encoding="utf-8") as f:
+        f.write(php_code)
+
+    scp_cmd = [
+        "sshpass", "-p", SSH_PASS,
+        "scp", "-P", SSH_PORT,
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "ConnectTimeout=15",
+        local_temp, f"{SSH_USER}@{SSH_HOST}:{remote_temp}"
+    ]
+    try:
+        res_scp = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        print(f"[ERROR] SCP timeout ({timeout}s)", file=sys.stderr, flush=True)
+        return None
+    finally:
+        try:
+            os.remove(local_temp)
+        except:
+            pass
+
+    if res_scp.returncode != 0:
+        print(f"[ERROR] Error SCP: {res_scp.stderr.strip()}", file=sys.stderr, flush=True)
+        return None
+
+    ssh_cmd = [
+        "sshpass", "-p", SSH_PASS,
+        "ssh", "-p", SSH_PORT,
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "ConnectTimeout=15",
+        f"{SSH_USER}@{SSH_HOST}",
+        f"wp --path={WP_PATH} eval-file {remote_temp} && rm -f {remote_temp}"
+    ]
+    try:
+        res_ssh = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        print(f"[ERROR] SSH timeout ({timeout}s)", file=sys.stderr, flush=True)
+        return None
+
+    if res_ssh.returncode != 0 and not res_ssh.stdout:
+        print(f"[ERROR] Error SSH WP eval: {res_ssh.stderr.strip()}", file=sys.stderr, flush=True)
+        return None
+
+    return res_ssh.stdout
+
+# ================= Glossary =================
+def load_glossary():
+    if os.path.exists(GLOSSARY_FILE):
+        try:
+            with open(GLOSSARY_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"[WARN] Error cargando glosario: {e}", flush=True)
+    return {}
+
+GLOSSARY = load_glossary()
+
+# ================= Filter & Cleaner =================
+def should_skip(text):
+    if not text:
+        return True
+    s = text.strip()
+    if len(s) == 0:
+        return True
+    if len(s) <= 2 and not s.isalnum():
+        return True
+    if s.startswith("http://") or s.startswith("https://") or s.startswith("//"):
+        return True
+    if s.startswith("data:image"):
+        return True
+    if "%7B" in s or "%22" in s or "%5B" in s:
+        return True
+    if s.startswith("{") and s.endswith("}"):
+        return True
+    if s.startswith("[") and s.endswith("]"):
+        return True
+    if re.match(r"^[\d\s\.\,\:\;\-\_\+\*\/\=\%\$\€\(\)\[\]#@!<>]+$", s):
+        return True
+    if re.match(r"^<[^>]+>$", s):
+        return True
+    return False
+
+# ================= Multi-Provider Translation Engine =================
+def translate_llm(text, target_lang):
+    """Translates text using local/remote LLM (LM Studio / OpenVINO). Preserves HTML tags and markdown."""
+    if not USE_LLM or not LLM_API_URL:
+        return None
+
+    target_lang_name = LANG_NAME_MAP.get(target_lang, target_lang)
+    endpoint = f"{LLM_API_URL.rstrip('/')}/chat/completions"
+    
+    prompt = (
+        f"You are a professional medical translator. Translate the following text from Spanish to {target_lang_name}.\n"
+        "Strict rules:\n"
+        "1. Preserve ALL HTML tags, shortcodes, placeholders (e.g. %s, {name}), and attributes exactly as they appear.\n"
+        "2. Keep medical terminology accurate and natural.\n"
+        "3. Output ONLY the translated text without any explanation, markdown backticks, or intro."
+    )
+
+    payload = json.dumps({
+        "model": LLM_MODEL,
+        "messages": [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": text}
+        ],
+        "temperature": 0.1,
+        "max_tokens": max(len(text) * 3, 100)
+    }).encode("utf-8")
+
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "WP-Medical-Translator/2.0"
+    }
+
+    req = urllib.request.Request(endpoint, data=payload, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as response:
+            if response.status == 200:
+                data = json.loads(response.read().decode("utf-8"))
+                choices = data.get("choices", [])
+                if choices and "message" in choices[0] and "content" in choices[0]["message"]:
+                    res = choices[0]["message"]["content"].strip()
+                    # Strip any accidental wrapping markdown quotes if present
+                    if res.startswith("```") and res.endswith("```"):
+                        res = re.sub(r"^```[a-zA-Z]*\n?", "", res)
+                        res = re.sub(r"\n?```$", "", res).strip()
+                    if res:
+                        return res
+    except Exception as e:
+        # Fallback silently to next provider
+        pass
+
+    return None
+
+def translate_deepl(text, target_lang):
+    """DeepL API with multi-key pool and automatic Free/Pro endpoint detection."""
+    global CURRENT_DEEPL_KEY_INDEX, DEEPL_KEYS
+    if not DEEPL_KEYS:
+        return None
+
+    deepl_target = DEEPL_LANG_MAP.get(target_lang) or DEEPL_LANG_MAP.get(target_lang.split("-")[0].lower())
+    if not deepl_target:
+        return None
+
+    total_keys = len(DEEPL_KEYS)
+    for _ in range(total_keys):
+        if CURRENT_DEEPL_KEY_INDEX >= len(DEEPL_KEYS):
+            CURRENT_DEEPL_KEY_INDEX = 0
+
+        api_key = DEEPL_KEYS[CURRENT_DEEPL_KEY_INDEX]
+        endpoint = "https://api-free.deepl.com/v2/translate" if api_key.endswith(":fx") else "https://api.deepl.com/v2/translate"
+
+        payload = json.dumps({
+            "text": [text],
+            "source_lang": "ES",
+            "target_lang": deepl_target
+        }).encode("utf-8")
+
+        headers = {
+            "Authorization": f"DeepL-Auth-Key {api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "WP-Medical-Translator/2.0"
+        }
+
+        req = urllib.request.Request(endpoint, data=payload, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as response:
+                if response.status == 200:
+                    data = json.loads(response.read().decode("utf-8"))
+                    translations = data.get("translations", [])
+                    if translations and "text" in translations[0]:
+                        return translations[0]["text"]
+        except urllib.error.HTTPError as e:
+            if e.code in (456, 403):  # 456 Quota exceeded, 403 Forbidden / invalid key
+                masked_key = api_key[:4] + "..." + api_key[-4:] if len(api_key) > 8 else "***"
+                print(f"[WARN DeepL] Clave {masked_key} sin cuota o inválida (HTTP {e.code}). Rotando a siguiente clave...", flush=True)
+                CURRENT_DEEPL_KEY_INDEX = (CURRENT_DEEPL_KEY_INDEX + 1) % len(DEEPL_KEYS)
+                continue
+            else:
+                break
+        except Exception:
+            break
+
+    return None
+
+def translate_google_chrome(text, target_lang):
+    """Google Translate via dict-chrome-ex endpoint"""
+    encoded_query = urllib.parse.quote(text)
+    url = f"https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=es&tl={target_lang}&q={encoded_query}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+    }
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=8) as response:
+        raw = response.read().decode("utf-8")
+        data = json.loads(raw)
+        if isinstance(data, list) and len(data) > 0:
+            if isinstance(data[0], str):
+                return data[0]
+            elif isinstance(data[0], list) and len(data[0]) > 0:
+                return "".join([str(seg) for seg in data[0] if seg])
+        elif isinstance(data, str):
+            return data
+    return None
+
+def translate_mymemory(text, target_lang):
+    """MyMemory Free Translation API Fallback"""
+    short_lang = target_lang.split("-")[0]
+    encoded_query = urllib.parse.quote(text)
+    url = f"https://api.mymemory.translated.net/get?q={encoded_query}&langpair=es|{short_lang}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; MedicalAssistant/1.0)"
+    }
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=8) as response:
+        data = json.loads(response.read().decode("utf-8"))
+        res_data = data.get("responseData", {})
+        trans = res_data.get("translatedText")
+        if trans and "MYMEMORY WARNING" not in trans.upper():
+            return trans
+    return None
+
+# ================= Translation Quality Verification & Checker =================
+def verify_and_correct_translation(original, translated, target_lang):
+    """
+    Final validation & correction step:
+    1. Checks tag/placeholder balance (HTML tags, %s, shortcodes).
+    2. Uses LLM verification to fix truncated or hallucinated translations.
+    3. Guarantees safety before persisting to WordPress database.
+    """
+    if not translated or translated == original:
+        return translated
+
+    # Check 1: HTML Tag Integrity
+    orig_tags = sorted(re.findall(r"<[^>]+>", original))
+    trans_tags = sorted(re.findall(r"<[^>]+>", translated))
+    
+    # Check 2: Placeholders (e.g. %s, %d, {name})
+    orig_placeholders = sorted(re.findall(r"%[sdf]|%[0-9]+\$[sdf]|{[^}]+}", original))
+    trans_placeholders = sorted(re.findall(r"%[sdf]|%[0-9]+\$[sdf]|{[^}]+}", translated))
+
+    tags_corrupted = (orig_tags != trans_tags)
+    placeholders_corrupted = (orig_placeholders != trans_placeholders)
+    is_suspicious = tags_corrupted or placeholders_corrupted or (len(original) > 20 and len(translated) < 3)
+
+    if is_suspicious and USE_LLM and LLM_API_URL:
+        target_lang_name = LANG_NAME_MAP.get(target_lang, target_lang)
+        endpoint = f"{LLM_API_URL.rstrip('/')}/chat/completions"
+        
+        prompt = (
+            f"You are a Senior Medical Proofreader and Quality Assurance Specialist for Web Localization.\n"
+            f"Original Spanish: {original}\n"
+            f"Draft Translation ({target_lang_name}): {translated}\n\n"
+            f"Review and correct the draft translation into {target_lang_name}.\n"
+            f"Strict requirements:\n"
+            f"1. Ensure ALL original HTML tags, shortcodes, and placeholders appear EXACTLY as in the original.\n"
+            f"2. Ensure accurate medical terminology and natural phrasing.\n"
+            f"3. Return ONLY the final corrected translation."
+        )
+
+        payload = json.dumps({
+            "model": LLM_MODEL,
+            "messages": [
+                {"role": "system", "content": prompt}
+            ],
+            "temperature": 0.05,
+            "max_tokens": max(len(original) * 3, 100)
+        }).encode("utf-8")
+
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "WP-Medical-Translator/2.0"
+        }
+
+        req = urllib.request.Request(endpoint, data=payload, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as response:
+                if response.status == 200:
+                    data = json.loads(response.read().decode("utf-8"))
+                    choices = data.get("choices", [])
+                    if choices and "message" in choices[0] and "content" in choices[0]["message"]:
+                        corrected = choices[0]["message"]["content"].strip()
+                        if corrected.startswith("```") and corrected.endswith("```"):
+                            corrected = re.sub(r"^```[a-zA-Z]*\n?", "", corrected)
+                            corrected = re.sub(r"\n?```$", "", corrected).strip()
+                        if corrected:
+                            return corrected
+        except Exception:
+            pass
+
+    return translated
+
+def translate_text(text, target_lang, retries=2):
+    if should_skip(text):
+        return text
+
+    # 1. Direct glossary lookup
+    text_lower = text.strip().lower()
+    if text_lower in GLOSSARY:
+        g_trans = GLOSSARY[text_lower].get(target_lang) or GLOSSARY[text_lower].get(target_lang[:2])
+        if g_trans:
+            return g_trans
+
+    translated_candidate = None
+
+    # 2. Multi-provider cascade
+    for attempt in range(retries):
+        # Try Priority 1: Local / Remote LLM (LM Studio / OpenVINO)
+        if USE_LLM:
+            try:
+                res = translate_llm(text, target_lang)
+                if res and len(res.strip()) > 0:
+                    translated_candidate = res
+                    break
+            except Exception:
+                pass
+
+        # Try Priority 2: DeepL (if API keys configured)
+        if DEEPL_KEYS:
+            try:
+                res = translate_deepl(text, target_lang)
+                if res and len(res.strip()) > 0:
+                    translated_candidate = res
+                    break
+            except Exception:
+                pass
+
+        # Try Priority 3: Google Chrome extension API
+        try:
+            res = translate_google_chrome(text, target_lang)
+            if res and len(res.strip()) > 0:
+                translated_candidate = res
+                break
+        except Exception:
+            pass
+
+        # Try Priority 4: MyMemory API
+        try:
+            res = translate_mymemory(text, target_lang)
+            if res and len(res.strip()) > 0:
+                translated_candidate = res
+                break
+        except Exception:
+            pass
+
+        time.sleep(1.0)
+
+    if not translated_candidate:
+        return text
+
+    # 3. Final Verification & Quality Assurance Step
+    final_translation = verify_and_correct_translation(text, translated_candidate, target_lang)
+    return final_translation
+
+# ================= Stats & Status =================
+def get_language_stats(lang_code):
+    table_name = f"wp_trp_dictionary_es_es_{lang_code.lower()}"
+    php_code = f"""<?php
+global $wpdb;
+$table = '{table_name}';
+$total = (int)$wpdb->get_var("SELECT COUNT(*) FROM $table");
+$translated = (int)$wpdb->get_var("SELECT COUNT(*) FROM $table WHERE translated IS NOT NULL AND translated != ''");
+$untranslated = (int)$wpdb->get_var("SELECT COUNT(*) FROM $table WHERE translated IS NULL OR translated = ''");
+echo json_encode(['total' => $total, 'translated' => $translated, 'untranslated' => $untranslated]);
+"""
+    out = run_remote_php(php_code)
+    if out:
+        try:
+            return json.loads(out)
+        except:
+            pass
+    return {"total": 0, "translated": 0, "untranslated": 0}
+
+def fetch_untranslated_batch(lang_code, limit=50):
+    table_name = f"wp_trp_dictionary_es_es_{lang_code.lower()}"
+    php_code = f"""<?php
+global $wpdb;
+$table = '{table_name}';
+$rows = $wpdb->get_results("
+    SELECT id, original 
+    FROM $table 
+    WHERE (translated IS NULL OR translated = '')
+      AND original NOT LIKE 'http%'
+      AND original NOT LIKE 'data:image%'
+      AND original NOT LIKE '%7B%'
+      AND original NOT LIKE '%5B%'
+      AND original NOT LIKE '{{%}}'
+      AND LENGTH(original) > 1
+    ORDER BY id ASC
+    LIMIT {limit}
+");
+echo json_encode($rows);
+"""
+    out = run_remote_php(php_code)
+    if out:
+        try:
+            return json.loads(out)
+        except Exception as e:
+            print(f"[ERROR] Parse batch JSON: {e}", flush=True)
+    return []
+
+def push_translations(lang_code, translations_list):
+    if not translations_list:
+        return 0
+
+    table_name = f"wp_trp_dictionary_es_es_{lang_code.lower()}"
+    php_data = json.dumps(translations_list, ensure_ascii=False)
+    
+    php_code = f"""<?php
+global $wpdb;
+$table = '{table_name}';
+$items = json_decode('{addslashes_php(php_data)}', true);
+
+$updated = 0;
+if (is_array($items)) {{
+    foreach ($items as $item) {{
+        $id = (int)$item['id'];
+        $trans = $item['translated'];
+        $status = 1; // Machine translated
+        
+        $res = $wpdb->update(
+            $table,
+            ['translated' => $trans, 'status' => $status],
+            ['id' => $id],
+            ['%s', '%d'],
+            ['%d']
+        );
+        if ($res !== false) {{
+            $updated++;
+        }}
+    }}
+}}
+echo json_encode(['updated' => $updated]);
+"""
+    out = run_remote_php(php_code)
+    if out:
+        try:
+            res = json.loads(out)
+            return res.get('updated', 0)
+        except:
+            pass
+    return 0
+
+def addslashes_php(s):
+    return s.replace('\\', '\\\\').replace("'", "\\'").replace('$', '\\$')
+
+# ================= Processing Workflow =================
+def process_language(lang_tp, lang_google, daily_limit):
+    print(f"\n=======================================================", flush=True)
+    print(f"[*] Idioma: {lang_tp} (Destino: {lang_google}) | Límite diario: {daily_limit}", flush=True)
+    print(f"=======================================================", flush=True)
+
+    stats_before = get_language_stats(lang_tp)
+    total = stats_before['total']
+    trans_before = stats_before['translated']
+    pct_before = (trans_before / total * 100) if total > 0 else 0.0
+    print(f"Estado inicial: {trans_before}/{total} ({pct_before:.2f}%) traducidas.", flush=True)
+
+    count_today = 0
+    while RUNNING and count_today < daily_limit:
+        chunk_size = min(BATCH_SIZE, daily_limit - count_today)
+        print(f"[{lang_tp}] Obteniendo lote de hasta {chunk_size} cadenas...", flush=True)
+        batch = fetch_untranslated_batch(lang_tp, limit=chunk_size)
+        if not batch:
+            print(f"[✓] No quedan más cadenas pendientes para {lang_tp}.", flush=True)
+            break
+
+        print(f"[{lang_tp}] Traduciendo lote de {len(batch)} cadenas...", flush=True)
+        to_update = []
+        for idx, row in enumerate(batch):
+            if not RUNNING:
+                break
+            original = row["original"]
+            item_id = row["id"]
+
+            if should_skip(original):
+                to_update.append({"id": item_id, "translated": original})
+            else:
+                translated = translate_text(original, lang_google)
+                if translated:
+                    to_update.append({"id": item_id, "translated": translated})
+                else:
+                    to_update.append({"id": item_id, "translated": original})
+                time.sleep(REQUEST_DELAY)
+
+            if (idx + 1) % 10 == 0 or (idx + 1) == len(batch):
+                print(f"[{lang_tp}] Traduciendo: {idx + 1}/{len(batch)} items...", flush=True)
+
+        if to_update:
+            print(f"[{lang_tp}] Guardando {len(to_update)} cadenas en WordPress...", flush=True)
+            updated = push_translations(lang_tp, to_update)
+            count_today += len(to_update)
+            print(f"[{lang_tp}] ✓ +{updated} cadenas subidas a BD (Total hoy: {count_today}/{daily_limit})", flush=True)
+
+        time.sleep(0.5)
+
+    stats_after = get_language_stats(lang_tp)
+    total_after = stats_after['total']
+    trans_after = stats_after['translated']
+    pct_after = (trans_after / total_after * 100) if total_after > 0 else 0.0
+    print(f"[RESUMEN {lang_tp}] Progreso final: {trans_after}/{total_after} ({pct_after:.2f}%) | +{count_today} traducidas hoy.\n", flush=True)
+
+    return {
+        "lang": lang_tp,
+        "google": lang_google,
+        "translated_today": count_today,
+        "total": total_after,
+        "translated": trans_after,
+        "pending": stats_after['untranslated'],
+        "percent": pct_after
+    }
+
+def run_daily_cycle():
+    start_time = datetime.now()
+    print(f"\n=======================================================", flush=True)
+    print(f"🚀 INICIANDO CICLO DIARIO: {start_time.strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
+    print(f"=======================================================", flush=True)
+
+    daily_results = []
+    for lang_tp, lang_google in LANG_MAP.items():
+        if not RUNNING:
+            break
+        res = process_language(lang_tp, lang_google, DAILY_LIMIT_PER_LANG)
+        daily_results.append(res)
+
+    end_time = datetime.now()
+    duration = end_time - start_time
+    print(f"\n=======================================================", flush=True)
+    print(f"✨ CICLO DIARIO COMPLETADO (Duración: {duration})", flush=True)
+    print(f"📊 TABLA GENERAL DE PROGRESO MULTILINGÜE:", flush=True)
+    print(f"-------------------------------------------------------", flush=True)
+    print(f"{'Idioma':<10} | {'Hoy':<8} | {'Traducidas':<12} | {'Pendientes':<10} | {'Progreso':<10}", flush=True)
+    print(f"-------------------------------------------------------", flush=True)
+    for r in daily_results:
+        print(f"{r['lang']:<10} | +{r['translated_today']:<7} | {r['translated']:<12} | {r['pending']:<10} | {r['percent']:.2f}%", flush=True)
+    print(f"=======================================================\n", flush=True)
+
+def main():
+    print("=======================================================", flush=True)
+    print("🤖 SERVICIO AUTÓNOMO DE TRADUCCIÓN WORDPRESS MULTILINGÜE", flush=True)
+    print("=======================================================", flush=True)
+    print(f"Host remoto: {SSH_HOST}:{SSH_PORT} ({SSH_USER})", flush=True)
+    print(f"Idiomas activos: {', '.join(LANG_MAP.keys())}", flush=True)
+    print(f"Límite por idioma / día: {DAILY_LIMIT_PER_LANG}", flush=True)
+    print(f"Frecuencia de ciclo: Cada {CYCLE_INTERVAL_HOURS} horas", flush=True)
+    if DEEPL_KEYS:
+        print(f"DeepL API: Activado ({len(DEEPL_KEYS)} claves en rotación)", flush=True)
+    else:
+        print("DeepL API: Desactivado (usando Google Chrome & MyMemory fallback)", flush=True)
+    print("=======================================================", flush=True)
+
+    while RUNNING:
+        run_daily_cycle()
+        if not RUNNING:
+            break
+        sleep_secs = int(CYCLE_INTERVAL_HOURS * 3600)
+        print(f"[💤] Pausando por {CYCLE_INTERVAL_HOURS} horas hasta el siguiente ciclo ({sleep_secs}s)...", flush=True)
+        
+        for _ in range(int(sleep_secs / 5)):
+            if not RUNNING:
+                break
+            time.sleep(5)
+
+    print("[INFO] Proceso detenido limpiamente.", flush=True)
+
+if __name__ == "__main__":
+    main()

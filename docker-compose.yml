@@ -1,0 +1,13 @@
+services:
+  wp-multilingual-translator:
+    build: .
+    container_name: wp-multilingual-translator
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./translator.py:/app/translator.py:ro
+      - ./glossary.json:/app/glossary.json:ro
+      - ./logs:/app/logs
+    environment:
+      - PYTHONUNBUFFERED=1
