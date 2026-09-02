@@ -48,11 +48,32 @@ raw_deepl_keys = os.getenv("DEEPL_API_KEYS", os.getenv("DEEPL_AUTH_KEY", ""))
 DEEPL_KEYS = [k.strip() for k in raw_deepl_keys.split(",") if k.strip()]
 CURRENT_DEEPL_KEY_INDEX = 0
 
-# Local / Remote LLM Translation Engine (OpenAI-compatible / LM Studio / OpenVINO)
+# Local / Remote Multi-GPU LLM Translation Pool (Intel ARC + AMD Radeon RX 480)
 USE_LLM = os.getenv("USE_LLM", "true").lower() in ("true", "1", "yes")
-LLM_API_URL = os.getenv("LLM_API_URL", "http://192.168.0.100:1236/v1")
-LLM_MODEL = os.getenv("LLM_MODEL", "qwen2.5-coder-7b-instruct [rx480 20.04t-s tool]")
+DEFAULT_ENDPOINTS = [
+    {
+        "url": "http://192.168.0.100:1236/v1",
+        "model": "qwen2.5-coder-7b-instruct:2",
+        "name": "Intel-ARC (Khazad-dum)"
+    },
+    {
+        "url": "http://192.168.0.80:1234/v1",
+        "model": "qwen2.5-coder-7b-instruct [rx480 20.04t-s tool]",
+        "name": "AMD-RX480 (rpi5-4-hailo)"
+    }
+]
+
+raw_endpoints = os.getenv("LLM_ENDPOINTS_JSON", "")
+if raw_endpoints:
+    try:
+        LLM_ENDPOINTS = json.loads(raw_endpoints)
+    except:
+        LLM_ENDPOINTS = DEFAULT_ENDPOINTS
+else:
+    LLM_ENDPOINTS = DEFAULT_ENDPOINTS
+
 LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "60"))
+NUM_WORKERS = int(os.getenv("NUM_WORKERS", str(max(len(LLM_ENDPOINTS) * 2, 4))))
 
 LANG_NAME_MAP = {
     "en_GB": "British English",
@@ -70,11 +91,21 @@ LANG_NAME_MAP = {
 
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "50"))
 DAILY_LIMIT_PER_LANG = int(os.getenv("DAILY_LIMIT_PER_LANG", "1000"))
-REQUEST_DELAY = float(os.getenv("REQUEST_DELAY", "0.2"))
+REQUEST_DELAY = float(os.getenv("REQUEST_DELAY", "0.05"))
 CYCLE_INTERVAL_HOURS = float(os.getenv("CYCLE_INTERVAL_HOURS", "24"))
 GLOSSARY_FILE = os.getenv("GLOSSARY_FILE", "glossary.json")
 
 RUNNING = True
+SSH_LOCK = threading.Lock()
+ENDPOINT_LOCK = threading.Lock()
+ENDPOINT_INDEX = 0
+
+def get_next_endpoint():
+    global ENDPOINT_INDEX
+    with ENDPOINT_LOCK:
+        ep = LLM_ENDPOINTS[ENDPOINT_INDEX % len(LLM_ENDPOINTS)]
+        ENDPOINT_INDEX += 1
+        return ep
 
 def handle_signal(sig, frame):
     global RUNNING
@@ -174,12 +205,11 @@ def should_skip(text):
 
 # ================= Multi-Provider Translation Engine =================
 def translate_llm(text, target_lang):
-    """Translates text using local/remote LLM (LM Studio / OpenVINO). Preserves HTML tags and markdown."""
-    if not USE_LLM or not LLM_API_URL:
+    """Translates text using Multi-GPU LLM Pool (Intel ARC + AMD RX 480). Preserves HTML tags and markdown."""
+    if not USE_LLM or not LLM_ENDPOINTS:
         return None
 
     target_lang_name = LANG_NAME_MAP.get(target_lang, target_lang)
-    endpoint = f"{LLM_API_URL.rstrip('/')}/chat/completions"
     
     prompt = (
         f"You are a professional medical translator. Translate the following text from Spanish to {target_lang_name}.\n"
@@ -189,38 +219,45 @@ def translate_llm(text, target_lang):
         "3. Output ONLY the translated text without any explanation, markdown backticks, or intro."
     )
 
-    payload = json.dumps({
-        "model": LLM_MODEL,
-        "messages": [
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": text}
-        ],
-        "temperature": 0.1,
-        "max_tokens": max(len(text) * 3, 100)
-    }).encode("utf-8")
-
     headers = {
         "Content-Type": "application/json",
         "User-Agent": "WP-Medical-Translator/2.0"
     }
 
-    req = urllib.request.Request(endpoint, data=payload, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as response:
-            if response.status == 200:
-                data = json.loads(response.read().decode("utf-8"))
-                choices = data.get("choices", [])
-                if choices and "message" in choices[0] and "content" in choices[0]["message"]:
-                    res = choices[0]["message"]["content"].strip()
-                    # Strip any accidental wrapping markdown quotes if present
-                    if res.startswith("```") and res.endswith("```"):
-                        res = re.sub(r"^```[a-zA-Z]*\n?", "", res)
-                        res = re.sub(r"\n?```$", "", res).strip()
-                    if res:
-                        return res
-    except Exception as e:
-        # Fallback silently to next provider
-        pass
+    # Start with next round-robin endpoint, fallback to remaining endpoints
+    start_ep = get_next_endpoint()
+    endpoints_to_try = [start_ep]
+    for ep in LLM_ENDPOINTS:
+        if ep not in endpoints_to_try:
+            endpoints_to_try.append(ep)
+
+    for ep in endpoints_to_try:
+        endpoint = f"{ep['url'].rstrip('/')}/chat/completions"
+        payload = json.dumps({
+            "model": ep["model"],
+            "messages": [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": text}
+            ],
+            "temperature": 0.1,
+            "max_tokens": max(len(text) * 3, 100)
+        }).encode("utf-8")
+
+        try:
+            req = urllib.request.Request(endpoint, data=payload, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as response:
+                if response.status == 200:
+                    data = json.loads(response.read().decode("utf-8"))
+                    choices = data.get("choices", [])
+                    if choices and "message" in choices[0] and "content" in choices[0]["message"]:
+                        res = choices[0]["message"]["content"].strip()
+                        if res.startswith("```") and res.endswith("```"):
+                            res = re.sub(r"^```[a-zA-Z]*\n?", "", res)
+                            res = re.sub(r"\n?```$", "", res).strip()
+                        if res:
+                            return res
+        except Exception:
+            continue
 
     return None
 
@@ -536,6 +573,20 @@ echo json_encode(['updated' => $updated]);
 def addslashes_php(s):
     return s.replace('\\', '\\\\').replace("'", "\\'").replace('$', '\\$')
 
+def translate_single_item(row, lang_google):
+    if not RUNNING:
+        return None
+    original = row["original"]
+    item_id = row["id"]
+    if should_skip(original):
+        return {"id": item_id, "translated": original}
+    else:
+        translated = translate_text(original, lang_google)
+        if translated:
+            return {"id": item_id, "translated": translated}
+        else:
+            return {"id": item_id, "translated": original}
+
 # ================= Processing Workflow =================
 def process_language(lang_tp, lang_google, daily_limit):
     print(f"\n=======================================================", flush=True)
@@ -557,30 +608,16 @@ def process_language(lang_tp, lang_google, daily_limit):
             print(f"[✓] No quedan más cadenas pendientes para {lang_tp}.", flush=True)
             break
 
-        print(f"[{lang_tp}] Traduciendo lote de {len(batch)} cadenas...", flush=True)
-        to_update = []
-        for idx, row in enumerate(batch):
-            if not RUNNING:
-                break
-            original = row["original"]
-            item_id = row["id"]
-
-            if should_skip(original):
-                to_update.append({"id": item_id, "translated": original})
-            else:
-                translated = translate_text(original, lang_google)
-                if translated:
-                    to_update.append({"id": item_id, "translated": translated})
-                else:
-                    to_update.append({"id": item_id, "translated": original})
-                time.sleep(REQUEST_DELAY)
-
-            if (idx + 1) % 10 == 0 or (idx + 1) == len(batch):
-                print(f"[{lang_tp}] Traduciendo: {idx + 1}/{len(batch)} items...", flush=True)
+        print(f"[{lang_tp}] Traduciendo lote de {len(batch)} cadenas en paralelo ({NUM_WORKERS} workers Dual-GPU)...", flush=True)
+        with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
+            results = list(executor.map(lambda r: translate_single_item(r, lang_google), batch))
+        
+        to_update = [r for r in results if r is not None]
 
         if to_update:
             print(f"[{lang_tp}] Guardando {len(to_update)} cadenas en WordPress...", flush=True)
-            updated = push_translations(lang_tp, to_update)
+            with SSH_LOCK:
+                updated = push_translations(lang_tp, to_update)
             count_today += len(to_update)
             print(f"[{lang_tp}] ✓ +{updated} cadenas subidas a BD (Total hoy: {count_today}/{daily_limit})", flush=True)
 
