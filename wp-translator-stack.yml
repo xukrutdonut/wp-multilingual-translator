@@ -15,9 +15,9 @@ services:
       - REQUEST_DELAY=0.1
       - CYCLE_INTERVAL_HOURS=0
       - USE_LLM=true
-      - LLM_API_URL=http://192.168.0.100:1234/v1
-      - LLM_MODEL=rx480/qwen1.5-moe-a2.7b-chat@q4_k_m
-      - LLM_ENDPOINTS_JSON=[{"url":"http://192.168.0.100:1234/v1","model":"rx480/qwen1.5-moe-a2.7b-chat@q4_k_m","name":"AMD-RX480 (Khazad-dum)"},{"url":"http://192.168.0.100:1234/v1","model":"intel-arc-qwen2.5-coder-7b-instruct","name":"Intel-ARC (Khazad-dum)"}]
+      - LLM_API_URL=http://192.168.0.100:1235/v1
+      - LLM_MODEL=qwen2.5-coder-7b-instruct
+      - LLM_ENDPOINTS_JSON=[{"url":"http://192.168.0.100:1235/v1","model":"qwen2.5-coder-7b-instruct","name":"AMD-RX480 Vulkan (Khazad-dum)"},{"url":"http://192.168.0.100:8006/v1","model":"qwen2.5-7b-instruct-int4-ov","name":"Intel-ARC OpenVINO (Khazad-dum)"}]
       - NUM_WORKERS=4
       - LLM_TIMEOUT=60
       - DEEPL_API_KEYS=9cab9e80-1ad0-4fd3-adf5-09ca3bbc4bf9:fx

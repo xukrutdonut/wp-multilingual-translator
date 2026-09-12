@@ -52,18 +52,18 @@ CURRENT_DEEPL_KEY_INDEX = 0
 
 # Local / Remote Multi-GPU LLM Translation Pool (Intel ARC + AMD Radeon RX 480)
 USE_LLM = os.getenv("USE_LLM", "true").lower() in ("true", "1", "yes")
-LLM_API_URL = os.getenv("LLM_API_URL", "http://192.168.0.100:1234/v1")
-LLM_MODEL = os.getenv("LLM_MODEL", "rx480/qwen1.5-moe-a2.7b-chat@q4_k_m")
+LLM_API_URL = os.getenv("LLM_API_URL", "http://192.168.0.100:1235/v1")
+LLM_MODEL = os.getenv("LLM_MODEL", "qwen2.5-coder-7b-instruct")
 DEFAULT_ENDPOINTS = [
     {
-        "url": "http://192.168.0.100:1234/v1",
-        "model": "rx480/qwen1.5-moe-a2.7b-chat@q4_k_m",
-        "name": "AMD-RX480 (Khazad-dum)"
+        "url": "http://192.168.0.100:1235/v1",
+        "model": "qwen2.5-coder-7b-instruct",
+        "name": "AMD-RX480 Vulkan (Khazad-dum)"
     },
     {
-        "url": "http://192.168.0.100:1234/v1",
-        "model": "intel-arc-qwen2.5-coder-7b-instruct",
-        "name": "Intel-ARC (Khazad-dum)"
+        "url": "http://192.168.0.100:8006/v1",
+        "model": "qwen2.5-7b-instruct-int4-ov",
+        "name": "Intel-ARC OpenVINO (Khazad-dum)"
     }
 ]
 
