@@ -52,16 +52,18 @@ CURRENT_DEEPL_KEY_INDEX = 0
 
 # Local / Remote Multi-GPU LLM Translation Pool (Intel ARC + AMD Radeon RX 480)
 USE_LLM = os.getenv("USE_LLM", "true").lower() in ("true", "1", "yes")
+LLM_API_URL = os.getenv("LLM_API_URL", "http://192.168.0.100:1234/v1")
+LLM_MODEL = os.getenv("LLM_MODEL", "rx480/qwen1.5-moe-a2.7b-chat@q4_k_m")
 DEFAULT_ENDPOINTS = [
     {
-        "url": "http://192.168.0.100:1236/v1",
-        "model": "qwen2.5-coder-7b-instruct:2",
-        "name": "Intel-ARC (Khazad-dum)"
+        "url": "http://192.168.0.100:1234/v1",
+        "model": "rx480/qwen1.5-moe-a2.7b-chat@q4_k_m",
+        "name": "AMD-RX480 (Khazad-dum)"
     },
     {
-        "url": "http://192.168.0.80:1234/v1",
-        "model": "qwen2.5-coder-7b-instruct [rx480 20.04t-s tool]",
-        "name": "AMD-RX480 (rpi5-4-hailo)"
+        "url": "http://192.168.0.100:1234/v1",
+        "model": "intel-arc-qwen2.5-coder-7b-instruct",
+        "name": "Intel-ARC (Khazad-dum)"
     }
 ]
 
@@ -92,9 +94,9 @@ LANG_NAME_MAP = {
 }
 
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "50"))
-DAILY_LIMIT_PER_LANG = int(os.getenv("DAILY_LIMIT_PER_LANG", "1000"))
+DAILY_LIMIT_PER_LANG = int(os.getenv("DAILY_LIMIT_PER_LANG", "0"))
 REQUEST_DELAY = float(os.getenv("REQUEST_DELAY", "0.05"))
-CYCLE_INTERVAL_HOURS = float(os.getenv("CYCLE_INTERVAL_HOURS", "24"))
+CYCLE_INTERVAL_HOURS = float(os.getenv("CYCLE_INTERVAL_HOURS", "0"))
 GLOSSARY_FILE = os.getenv("GLOSSARY_FILE", "glossary.json")
 
 RUNNING = True
@@ -374,10 +376,8 @@ def verify_and_correct_translation(original, translated, target_lang):
     placeholders_corrupted = (orig_placeholders != trans_placeholders)
     is_suspicious = tags_corrupted or placeholders_corrupted or (len(original) > 20 and len(translated) < 3)
 
-    if is_suspicious and USE_LLM and LLM_API_URL:
+    if is_suspicious and USE_LLM and (LLM_ENDPOINTS or LLM_API_URL):
         target_lang_name = LANG_NAME_MAP.get(target_lang, target_lang)
-        endpoint = f"{LLM_API_URL.rstrip('/')}/chat/completions"
-        
         prompt = (
             f"You are a Senior Medical Proofreader and Quality Assurance Specialist for Web Localization.\n"
             f"Original Spanish: {original}\n"
@@ -389,35 +389,38 @@ def verify_and_correct_translation(original, translated, target_lang):
             f"3. Return ONLY the final corrected translation."
         )
 
-        payload = json.dumps({
-            "model": LLM_MODEL,
-            "messages": [
-                {"role": "system", "content": prompt}
-            ],
-            "temperature": 0.05,
-            "max_tokens": max(len(original) * 3, 100)
-        }).encode("utf-8")
-
         headers = {
             "Content-Type": "application/json",
             "User-Agent": "WP-Medical-Translator/2.0"
         }
 
-        req = urllib.request.Request(endpoint, data=payload, headers=headers, method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as response:
-                if response.status == 200:
-                    data = json.loads(response.read().decode("utf-8"))
-                    choices = data.get("choices", [])
-                    if choices and "message" in choices[0] and "content" in choices[0]["message"]:
-                        corrected = choices[0]["message"]["content"].strip()
-                        if corrected.startswith("```") and corrected.endswith("```"):
-                            corrected = re.sub(r"^```[a-zA-Z]*\n?", "", corrected)
-                            corrected = re.sub(r"\n?```$", "", corrected).strip()
-                        if corrected:
-                            return corrected
-        except Exception:
-            pass
+        endpoints_to_try = list(LLM_ENDPOINTS) if LLM_ENDPOINTS else [{"url": LLM_API_URL, "model": LLM_MODEL}]
+        for ep in endpoints_to_try:
+            endpoint_url = f"{ep['url'].rstrip('/')}/chat/completions"
+            payload = json.dumps({
+                "model": ep.get("model", LLM_MODEL),
+                "messages": [
+                    {"role": "system", "content": prompt}
+                ],
+                "temperature": 0.05,
+                "max_tokens": max(len(original) * 3, 100)
+            }).encode("utf-8")
+
+            req = urllib.request.Request(endpoint_url, data=payload, headers=headers, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as response:
+                    if response.status == 200:
+                        data = json.loads(response.read().decode("utf-8"))
+                        choices = data.get("choices", [])
+                        if choices and "message" in choices[0] and "content" in choices[0]["message"]:
+                            corrected = choices[0]["message"]["content"].strip()
+                            if corrected.startswith("```") and corrected.endswith("```"):
+                                corrected = re.sub(r"^```[a-zA-Z]*\n?", "", corrected)
+                                corrected = re.sub(r"\n?```$", "", corrected).strip()
+                            if corrected:
+                                return corrected
+            except Exception:
+                continue
 
     return translated
 
@@ -534,13 +537,16 @@ def push_translations(lang_code, translations_list):
     if not translations_list:
         return 0
 
+    import base64
     table_name = f"wp_trp_dictionary_es_es_{lang_code.lower()}"
     php_data = json.dumps(translations_list, ensure_ascii=False)
+    b64_data = base64.b64encode(php_data.encode("utf-8")).decode("ascii")
     
     php_code = f"""<?php
 global $wpdb;
 $table = '{table_name}';
-$items = json_decode('{addslashes_php(php_data)}', true);
+$raw = base64_decode('{b64_data}');
+$items = json_decode($raw, true);
 
 $updated = 0;
 if (is_array($items)) {{
@@ -572,9 +578,6 @@ echo json_encode(['updated' => $updated]);
             pass
     return 0
 
-def addslashes_php(s):
-    return s.replace('\\', '\\\\').replace("'", "\\'").replace('$', '\\$')
-
 def translate_single_item(row, lang_google):
     if not RUNNING:
         return None
@@ -591,8 +594,10 @@ def translate_single_item(row, lang_google):
 
 # ================= Processing Workflow =================
 def process_language(lang_tp, lang_google, daily_limit):
+    is_unlimited = (daily_limit <= 0)
+    limit_str = "Ilimitado" if is_unlimited else str(daily_limit)
     print(f"\n=======================================================", flush=True)
-    print(f"[*] Idioma: {lang_tp} (Destino: {lang_google}) | Límite diario: {daily_limit}", flush=True)
+    print(f"[*] Idioma: {lang_tp} (Destino: {lang_google}) | Límite diario: {limit_str}", flush=True)
     print(f"=======================================================", flush=True)
 
     stats_before = get_language_stats(lang_tp)
@@ -602,8 +607,8 @@ def process_language(lang_tp, lang_google, daily_limit):
     print(f"Estado inicial: {trans_before}/{total} ({pct_before:.2f}%) traducidas.", flush=True)
 
     count_today = 0
-    while RUNNING and count_today < daily_limit:
-        chunk_size = min(BATCH_SIZE, daily_limit - count_today)
+    while RUNNING and (is_unlimited or count_today < daily_limit):
+        chunk_size = BATCH_SIZE if is_unlimited else min(BATCH_SIZE, daily_limit - count_today)
         print(f"[{lang_tp}] Obteniendo lote de hasta {chunk_size} cadenas...", flush=True)
         batch = fetch_untranslated_batch(lang_tp, limit=chunk_size)
         if not batch:
@@ -621,15 +626,15 @@ def process_language(lang_tp, lang_google, daily_limit):
             with SSH_LOCK:
                 updated = push_translations(lang_tp, to_update)
             count_today += len(to_update)
-            print(f"[{lang_tp}] ✓ +{updated} cadenas subidas a BD (Total hoy: {count_today}/{daily_limit})", flush=True)
+            print(f"[{lang_tp}] ✓ +{updated} cadenas subidas a BD (Total sesión: {count_today}/{limit_str})", flush=True)
 
-        time.sleep(0.5)
+        time.sleep(REQUEST_DELAY)
 
     stats_after = get_language_stats(lang_tp)
     total_after = stats_after['total']
     trans_after = stats_after['translated']
     pct_after = (trans_after / total_after * 100) if total_after > 0 else 0.0
-    print(f"[RESUMEN {lang_tp}] Progreso final: {trans_after}/{total_after} ({pct_after:.2f}%) | +{count_today} traducidas hoy.\n", flush=True)
+    print(f"[RESUMEN {lang_tp}] Progreso final: {trans_after}/{total_after} ({pct_after:.2f}%) | +{count_today} traducidas en esta pasada.\n", flush=True)
 
     return {
         "lang": lang_tp,
@@ -644,7 +649,7 @@ def process_language(lang_tp, lang_google, daily_limit):
 def run_daily_cycle():
     start_time = datetime.now()
     print(f"\n=======================================================", flush=True)
-    print(f"🚀 INICIANDO CICLO DIARIO: {start_time.strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
+    print(f"🚀 INICIANDO CICLO DE TRADUCCIÓN: {start_time.strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
     print(f"=======================================================", flush=True)
 
     daily_results = []
@@ -657,10 +662,10 @@ def run_daily_cycle():
     end_time = datetime.now()
     duration = end_time - start_time
     print(f"\n=======================================================", flush=True)
-    print(f"✨ CICLO DIARIO COMPLETADO (Duración: {duration})", flush=True)
+    print(f"✨ CICLO COMPLETADO (Duración: {duration})", flush=True)
     print(f"📊 TABLA GENERAL DE PROGRESO MULTILINGÜE:", flush=True)
     print(f"-------------------------------------------------------", flush=True)
-    print(f"{'Idioma':<10} | {'Hoy':<8} | {'Traducidas':<12} | {'Pendientes':<10} | {'Progreso':<10}", flush=True)
+    print(f"{'Idioma':<10} | {'Sesión':<8} | {'Traducidas':<12} | {'Pendientes':<10} | {'Progreso':<10}", flush=True)
     print(f"-------------------------------------------------------", flush=True)
     for r in daily_results:
         print(f"{r['lang']:<10} | +{r['translated_today']:<7} | {r['translated']:<12} | {r['pending']:<10} | {r['percent']:.2f}%", flush=True)
@@ -672,8 +677,10 @@ def main():
     print("=======================================================", flush=True)
     print(f"Host remoto: {SSH_HOST}:{SSH_PORT} ({SSH_USER})", flush=True)
     print(f"Idiomas activos: {', '.join(LANG_MAP.keys())}", flush=True)
-    print(f"Límite por idioma / día: {DAILY_LIMIT_PER_LANG}", flush=True)
-    print(f"Frecuencia de ciclo: Cada {CYCLE_INTERVAL_HOURS} horas", flush=True)
+    limit_str = "Ilimitado" if DAILY_LIMIT_PER_LANG <= 0 else str(DAILY_LIMIT_PER_LANG)
+    print(f"Límite por idioma / día: {limit_str}", flush=True)
+    freq_str = "Continuo (sin espera)" if CYCLE_INTERVAL_HOURS <= 0 else f"Cada {CYCLE_INTERVAL_HOURS} horas"
+    print(f"Frecuencia de ciclo: {freq_str}", flush=True)
     if DEEPL_KEYS:
         print(f"DeepL API: Activado ({len(DEEPL_KEYS)} claves en rotación)", flush=True)
     else:
@@ -684,13 +691,19 @@ def main():
         run_daily_cycle()
         if not RUNNING:
             break
-        sleep_secs = int(CYCLE_INTERVAL_HOURS * 3600)
-        print(f"[💤] Pausando por {CYCLE_INTERVAL_HOURS} horas hasta el siguiente ciclo ({sleep_secs}s)...", flush=True)
-        
-        for _ in range(int(sleep_secs / 5)):
-            if not RUNNING:
-                break
-            time.sleep(5)
+        if CYCLE_INTERVAL_HOURS <= 0:
+            print("[INFO] Modo continuo activo. Reiniciando comprobación en 30s...", flush=True)
+            for _ in range(6):
+                if not RUNNING:
+                    break
+                time.sleep(5)
+        else:
+            sleep_secs = int(CYCLE_INTERVAL_HOURS * 3600)
+            print(f"[💤] Pausando por {CYCLE_INTERVAL_HOURS} horas hasta el siguiente ciclo ({sleep_secs}s)...", flush=True)
+            for _ in range(int(sleep_secs / 5)):
+                if not RUNNING:
+                    break
+                time.sleep(5)
 
     print("[INFO] Proceso detenido limpiamente.", flush=True)
 

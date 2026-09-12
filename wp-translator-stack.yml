@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   translator:
-    image: 192.168.0.101:5555/wp-multilingual-translator:latest
+    image: wp-multilingual-translator:latest
     environment:
       - PYTHONUNBUFFERED=1
       - SSH_HOST=89.117.169.108
@@ -10,13 +10,15 @@ services:
       - SSH_USER=u691704582
       - SSH_PASS=Mayo-1968!
       - WP_PATH=/home/u691704582/domains/neuropediatoolkit.org/public_html/
-      - DAILY_LIMIT_PER_LANG=20000
+      - DAILY_LIMIT_PER_LANG=0
       - BATCH_SIZE=50
-      - REQUEST_DELAY=0.2
-      - CYCLE_INTERVAL_HOURS=24
+      - REQUEST_DELAY=0.1
+      - CYCLE_INTERVAL_HOURS=0
       - USE_LLM=true
-      - LLM_API_URL=http://192.168.0.80:1234/v1
-      - LLM_MODEL=qwen2.5-coder-7b-instruct
+      - LLM_API_URL=http://192.168.0.100:1234/v1
+      - LLM_MODEL=rx480/qwen1.5-moe-a2.7b-chat@q4_k_m
+      - LLM_ENDPOINTS_JSON=[{"url":"http://192.168.0.100:1234/v1","model":"rx480/qwen1.5-moe-a2.7b-chat@q4_k_m","name":"AMD-RX480 (Khazad-dum)"},{"url":"http://192.168.0.100:1234/v1","model":"intel-arc-qwen2.5-coder-7b-instruct","name":"Intel-ARC (Khazad-dum)"}]
+      - NUM_WORKERS=4
       - LLM_TIMEOUT=60
       - DEEPL_API_KEYS=9cab9e80-1ad0-4fd3-adf5-09ca3bbc4bf9:fx
     deploy:
